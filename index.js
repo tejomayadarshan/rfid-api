@@ -1,7 +1,10 @@
-const express = require("express");
-const cors = require("cors");
-const { PrismaClient } = require("@prisma/client");
+import express from "express";
+import cors from "cors";
+import fetch from "node-fetch";
+import { PrismaClient } from "@prisma/client";
+import dotenv from "dotenv";
 
+dotenv.config();
 const prisma = new PrismaClient();
 const app = express();
 
@@ -12,12 +15,12 @@ app.use(express.json());
 // ✅ API ROOT CHECK
 // =======================================
 app.get("/", (req, res) => {
-  res.json({ ok: true, service: "RFID API" });
+  res.json({ ok: true, service: "RFID API Running" });
 });
 
 
 // =======================================
-// ✅ GET STUDENT BY UID (ESP8266 uses this)
+// ✅ GET STUDENT BY UID (ESP8266 calls this)
 // =======================================
 app.get("/uid/:uid", async (req, res) => {
   try {
@@ -28,7 +31,7 @@ app.get("/uid/:uid", async (req, res) => {
     });
 
     if (!student) {
-      return res.json({ name: "", phone: "" });
+      return res.json({ name: "", phone: "" });  // unknown student
     }
 
     return res.json({
@@ -46,7 +49,6 @@ app.get("/uid/:uid", async (req, res) => {
 // ===========================================
 // ✅ AUTO ENTRY/EXIT DETECTION
 // Returns: "Entry", "Exit", or "None"
-// ESP8266 uses this to auto detect next action
 // ===========================================
 app.get("/status/:name", async (req, res) => {
   try {
@@ -54,12 +56,12 @@ app.get("/status/:name", async (req, res) => {
 
     const latest = await prisma.attendanceLog.findFirst({
       where: { student: { name } },
-      orderBy: { ts: "desc" }   // ✅ FIXED FIELD NAME "ts"
+      orderBy: { ts: "desc" }  // ✅ FIXED field name
     });
 
-    if (!latest) return res.send("None");  // first scan of day
+    if (!latest) return res.send("None");  // first scan of the day
 
-    return res.send(latest.status);  // "Entry" or "Exit"
+    return res.send(latest.status);        // "Entry" or "Exit"
 
   } catch (err) {
     console.error("STATUS ERROR:", err);
@@ -69,7 +71,51 @@ app.get("/status/:name", async (req, res) => {
 
 
 // =======================================
-// ✅ LOG ATTENDANCE FROM ESP8266
+// ✅ Send SMS using Fast2SMS DLT route
+// =======================================
+async function sendSMS(phone, name, status) {
+  try {
+    const template =
+      status === "Entry"
+        ? process.env.ENTRY_TEMPLATE
+        : status === "Exit"
+        ? process.env.EXIT_TEMPLATE
+        : process.env.ABSENT_TEMPLATE;
+
+    const timestamp = new Date().toLocaleString("en-IN", {
+      timeZone: "Asia/Kolkata",
+    });
+
+    const vars =
+      status === "Absent" ? `${name}` : `${name}|${timestamp}`;
+
+    const payload = {
+      route: "dlt",
+      sender_id: process.env.SENDER_ID,
+      message: template,
+      variables_values: vars,
+      numbers: phone,
+    };
+
+    await fetch("https://www.fast2sms.com/dev/bulkV2", {
+      method: "POST",
+      headers: {
+        authorization: process.env.FAST2SMS_API_KEY,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    console.log("✅ SMS sent to:", phone);
+
+  } catch (err) {
+    console.error("SMS ERROR:", err);
+  }
+}
+
+
+// =======================================
+// ✅ LOG ATTENDANCE + SEND SMS
 // =======================================
 app.post("/log", async (req, res) => {
   try {
@@ -78,7 +124,6 @@ app.post("/log", async (req, res) => {
     if (!name || !status)
       return res.status(400).send("Missing parameters");
 
-    // Check if student exists
     const student = await prisma.student.findFirst({
       where: { name }
     });
@@ -86,13 +131,18 @@ app.post("/log", async (req, res) => {
     if (!student)
       return res.status(404).send("Unknown Student");
 
-    // Insert the log
+    // ✅ Create log entry
     await prisma.attendanceLog.create({
       data: {
         studentId: student.id,
-        status: status
-      }
+        status: status,
+      },
     });
+
+    // ✅ Send SMS only if phone exists
+    if (student.phone) {
+      await sendSMS(student.phone, name, status);
+    }
 
     return res.send("Logged");
 
