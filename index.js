@@ -8,17 +8,17 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// =====================
-// ✅ Base Route
-// =====================
+// =======================================
+// ✅ API ROOT CHECK
+// =======================================
 app.get("/", (req, res) => {
   res.json({ ok: true, service: "RFID API" });
 });
 
 
-// =====================
-// ✅ Get Student by UID
-// =====================
+// =======================================
+// ✅ GET STUDENT BY UID (ESP8266 uses this)
+// =======================================
 app.get("/uid/:uid", async (req, res) => {
   try {
     const uid = req.params.uid;
@@ -31,42 +31,46 @@ app.get("/uid/:uid", async (req, res) => {
       return res.json({ name: "", phone: "" });
     }
 
-    res.json({ name: student.name, phone: student.phone || "" });
+    return res.json({
+      name: student.name,
+      phone: student.phone || ""
+    });
 
   } catch (err) {
-    console.error(err);
+    console.error("UID ERROR:", err);
     res.status(500).send("Server Error");
   }
 });
 
 
-// ================================
-// ✅ NEW — Last Status of Student
-// For Auto Entry/Exit Detection
-// ================================
+// ===========================================
+// ✅ AUTO ENTRY/EXIT DETECTION
+// Returns: "Entry", "Exit", or "None"
+// ESP8266 uses this to auto detect next action
+// ===========================================
 app.get("/status/:name", async (req, res) => {
   try {
     const name = req.params.name;
 
     const latest = await prisma.attendanceLog.findFirst({
       where: { student: { name } },
-      orderBy: { timestamp: "desc" }
+      orderBy: { ts: "desc" }   // ✅ FIXED FIELD NAME "ts"
     });
 
-    if (!latest) return res.send("None");   // No logs today
+    if (!latest) return res.send("None");  // first scan of day
 
-    return res.send(latest.status);         // "Entry" or "Exit"
+    return res.send(latest.status);  // "Entry" or "Exit"
 
   } catch (err) {
-    console.error(err);
-    res.status(500).send("Server Error");
+    console.error("STATUS ERROR:", err);
+    return res.status(500).send("Server Error");
   }
 });
 
 
-// =====================
-// ✅ Log Entry / Exit
-// =====================
+// =======================================
+// ✅ LOG ATTENDANCE FROM ESP8266
+// =======================================
 app.post("/log", async (req, res) => {
   try {
     const { name, status } = req.body;
@@ -74,6 +78,7 @@ app.post("/log", async (req, res) => {
     if (!name || !status)
       return res.status(400).send("Missing parameters");
 
+    // Check if student exists
     const student = await prisma.student.findFirst({
       where: { name }
     });
@@ -81,6 +86,7 @@ app.post("/log", async (req, res) => {
     if (!student)
       return res.status(404).send("Unknown Student");
 
+    // Insert the log
     await prisma.attendanceLog.create({
       data: {
         studentId: student.id,
@@ -88,19 +94,20 @@ app.post("/log", async (req, res) => {
       }
     });
 
-    res.send("Logged");
+    return res.send("Logged");
+
   } catch (err) {
-    console.error(err);
-    res.status(500).send("Server Error");
+    console.error("LOG ERROR:", err);
+    return res.status(500).send("Server Error");
   }
 });
 
 
-// =====================
-// ✅ Server Start
-// =====================
+// =======================================
+// ✅ START SERVER
+// =======================================
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`✅ RFID API Running on Port ${PORT}`);
+  console.log(`✅ RFID API running on port ${PORT}`);
 });
