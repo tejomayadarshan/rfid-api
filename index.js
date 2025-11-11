@@ -1,109 +1,121 @@
 import express from "express";
-import bodyParser from "body-parser";
-import pkg from "@prisma/client";
 import axios from "axios";
+import cors from "cors";
 import dotenv from "dotenv";
+import { PrismaClient } from "@prisma/client";
+
 dotenv.config();
-
-const { PrismaClient } = pkg;
-const prisma = new PrismaClient();
 const app = express();
+const prisma = new PrismaClient();
 
-app.use(bodyParser.json());
+app.use(cors());
+app.use(express.json());
 
-// ✅ Render requires port from env
-const PORT = process.env.PORT || 10000;
+// ✅ Root route
+app.get("/", (req, res) => {
+  res.send("✅ RFID API is live");
+});
 
-// ✅ Fast2SMS API
-const FAST2SMS_API = "https://www.fast2sms.com/dev/bulkV2";
-
-// ✅ Send SMS function
-async function sendSMS(number, messageId, vars) {
+// ✅ Attendance API
+app.post("/api/attendance", async (req, res) => {
   try {
-    await axios.post(
-      FAST2SMS_API,
-      {
-        route: "dlt",
-        sender_id: "SOHSFT",
-        message: messageId,
-        variables_values: vars,
-        numbers: number,
-      },
-      {
-        headers: {
-          authorization: process.env.FAST2SMS_KEY,
-        },
-      }
-    );
+    const { uid } = req.body;
 
-    console.log("✅ SMS sent:", number);
-  } catch (err) {
-    console.log("❌ SMS error:", err.response?.data || err.message);
-  }
-}
+    if (!uid) {
+      return res.status(400).json({ ok: false, msg: "UID missing" });
+    }
 
-// ✅ API endpoint for RFID
-app.post("/rfid", async (req, res) => {
-  try {
-    let { uid } = req.body;
-
-    if (!uid) return res.json({ ok: false, msg: "No UID" });
-
-    uid = uid.trim().toUpperCase();  // ✅ Normalize UID
-
-    console.log("👉 Incoming UID:", uid);
-
-    // ✅ Check if student exists
-    const student = await prisma.Student.findFirst({
+    // ✅ Find student by UID
+    const student = await prisma.Student.findUnique({
       where: { uid },
     });
 
     if (!student) {
-      console.log("❌ Unknown card");
-      return res.json({ ok: false, msg: "UNKNOWN" });
+      return res.status(404).json({ ok: false, msg: "Student not found" });
     }
 
-    console.log("✅ Student:", student.name);
-
-    // ✅ Check last attendance
-    const last = await prisma.Attendance.findFirst({
+    // ✅ Get latest log for student
+    const lastLog = await prisma.AttendanceLog.findFirst({
       where: { student_id: student.id },
-      orderBy: { id: "desc" },
+      orderBy: { timestamp: "desc" },
     });
 
-    let status = "entry";
-    if (last?.status === "entry") status = "exit";
+    // ✅ Decide next status (IN / OUT)
+    let status = "IN";
+    if (lastLog && lastLog.status === "IN") {
+      status = "OUT";
+    }
 
-    // ✅ Insert attendance
-    await prisma.Attendance.create({
+    // ✅ Save attendance log
+    const newLog = await prisma.AttendanceLog.create({
       data: {
         student_id: student.id,
         status,
       },
     });
 
-    console.log("✅ Attendance saved:", student.name, status);
+    // ✅ Send SMS
+    await sendSMS(student.name, student.phone, status);
 
-    // ✅ Send SMS    
-    const nowTime = new Date().toLocaleTimeString("en-IN", {
+    return res.json({
+      ok: true,
+      student: student.name,
+      status,
+      timestamp: newLog.timestamp,
+    });
+
+  } catch (err) {
+    console.error("🔥 API ERROR:", err);
+    return res.status(500).json({ ok: false, msg: "Server Error" });
+  }
+});
+
+// ✅ SMS Function
+async function sendSMS(name, phone, status) {
+  try {
+    const entityId = process.env.ENTITY_ID;
+    const fast2smsKey = process.env.FAST2SMS_KEY;
+
+    let templateId = "";
+    let variables_values = "";
+
+    const timeNow = new Date().toLocaleTimeString("en-IN", {
       hour: "2-digit",
       minute: "2-digit",
     });
 
-    if (status === "entry") {
-      await sendSMS(student.phone, "202168", `${student.name}|${nowTime}|`);
-    } else {
-      await sendSMS(student.phone, "202167", `${student.name}|${nowTime}|`);
+    if (status === "IN") {
+      templateId = "202168";
+      variables_values = `${name}|${timeNow}|`;
+    } else if (status === "OUT") {
+      templateId = "202167";
+      variables_values = `${name}|${timeNow}|`;
     }
 
-    return res.json({ ok: true, status, name: student.name });
+    const url = `https://www.fast2sms.com/dev/bulkV2`;
+    const payload = {
+      sender_id: "SOHSFT",
+      route: "v3",
+      numbers: phone,
+      message: templateId,
+      variables_values,
+      entity_id: entityId,
+    };
 
+    await axios.post(url, payload, {
+      headers: {
+        authorization: fast2smsKey,
+      },
+    });
+
+    console.log(`✅ SMS sent to: ${phone}`);
   } catch (err) {
-    console.error("API ERROR:", err);
-    return res.json({ ok: false, msg: "SERVER_ERR" });
+    console.error("❌ SMS ERROR:", err?.response?.data || err.message);
   }
-});
+}
 
+// ✅ Start server
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log("✅ RFID API running on port", PORT);
 });
